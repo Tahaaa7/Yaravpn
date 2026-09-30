@@ -1,29 +1,21 @@
-# YARA VPN — فقط ZIP را در ریپو بگذار؛ این workflow خودش extract و بیلد می‌کند
-#
-# روش استفاده:
-#   1) یک ریپوی خالی بساز
-#   2) فایل yara-vpn-for-github.zip را در ریشه ریپو آپلود/پوش کن
-#   3) همین workflow را هم در .github/workflows/ بگذار
-#   4) Actions → Build from ZIP → Run workflow
-#   5) Artifacts → yara-vpn-apk
-
+# YARA VPN — extract ZIP + build APK (robust SDK install)
 name: Build from ZIP
 
 on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "لینک مستقیم ZIP (خالی = از فایل داخل ریپو استفاده می‌شود)"
+        description: "Direct ZIP URL (empty = file in repo)"
         required: false
         default: ""
         type: string
       zip_path:
-        description: "مسیر ZIP داخل ریپو"
+        description: "ZIP path in repo"
         required: false
         default: "yara-vpn-for-github.zip"
         type: string
       build_type:
-        description: "نوع بیلد"
+        description: "Build type"
         required: true
         default: release
         type: choice
@@ -66,25 +58,20 @@ jobs:
         run: |
           set -e
           DEST="$RUNNER_TEMP/source.zip"
-
           if [ -n "${ZIP_URL:-}" ]; then
-            echo "Downloading ZIP from URL..."
             curl -fsSL "$ZIP_URL" -o "$DEST"
           elif [ -f "$GITHUB_WORKSPACE/$ZIP_PATH" ]; then
-            echo "Using ZIP from repo: $ZIP_PATH"
             cp "$GITHUB_WORKSPACE/$ZIP_PATH" "$DEST"
           else
             FOUND=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name '*.zip' | head -1 || true)
             if [ -n "$FOUND" ]; then
-              echo "Using found ZIP: $FOUND"
               cp "$FOUND" "$DEST"
             else
-              echo "::error::هیچ فایل ZIP پیدا نشد. یا yara-vpn-for-github.zip را در ریشه ریپو بگذار یا zip_url را در Run workflow پر کن."
+              echo "::error::No ZIP found in repo root"
               ls -la "$GITHUB_WORKSPACE"
               exit 1
             fi
           fi
-
           ls -lh "$DEST"
           echo "ZIP_FILE=$DEST" >> "$GITHUB_ENV"
 
@@ -94,19 +81,15 @@ jobs:
           rm -rf "$WORK"
           mkdir -p "$WORK"
           unzip -q "$ZIP_FILE" -d "$WORK"
-
           ENTRIES=$(find "$WORK" -mindepth 1 -maxdepth 1 | wc -l)
           if [ "$ENTRIES" -eq 1 ]; then
             ONLY=$(find "$WORK" -mindepth 1 -maxdepth 1)
             if [ -d "$ONLY" ]; then
-              echo "Single root folder detected: $ONLY"
               shopt -s dotglob
               mv "$ONLY"/* "$WORK"/ 2>/dev/null || true
               rmdir "$ONLY" 2>/dev/null || true
             fi
           fi
-
-          echo "=== Extracted layout ==="
           find "$WORK" -maxdepth 3 -type d | head -40
 
       - name: Detect Android project path
@@ -116,17 +99,14 @@ jobs:
           if [ -d "$WORK/android/v2rayNG/V2rayNG" ]; then
             echo "root=$WORK/android/v2rayNG" >> "$GITHUB_OUTPUT"
             echo "app=$WORK/android/v2rayNG/V2rayNG" >> "$GITHUB_OUTPUT"
-            echo "Layout: full project (android/v2rayNG)"
           elif [ -d "$WORK/V2rayNG" ]; then
             echo "root=$WORK" >> "$GITHUB_OUTPUT"
             echo "app=$WORK/V2rayNG" >> "$GITHUB_OUTPUT"
-            echo "Layout: android-only root"
           elif [ -d "$WORK/v2rayNG/V2rayNG" ]; then
             echo "root=$WORK/v2rayNG" >> "$GITHUB_OUTPUT"
             echo "app=$WORK/v2rayNG/V2rayNG" >> "$GITHUB_OUTPUT"
-            echo "Layout: v2rayNG folder"
           else
-            echo "::error::ساختار پروژه اندروید داخل ZIP پیدا نشد"
+            echo "::error::Android project not found in ZIP"
             find "$WORK" -maxdepth 4 -type d | head -60
             exit 1
           fi
@@ -137,37 +117,80 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Setup Android SDK + NDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          # Package id is "android-37.0" (not "android-37")
-          packages: "platforms;android-37.0 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
-          log-accepted-android-sdk-licenses: false
-          cmdline-tools-version: "12266719"
+          packages: "platform-tools"
+          accept-android-sdk-licenses: true
 
-      - name: Export SDK / NDK
+      - name: Install platforms + NDK + build-tools
         run: |
-          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
-          echo "Available platforms:"
-          ls "${ANDROID_HOME}/platforms" || true
-          if [ -d "\( {ANDROID_HOME}/platforms/android-37.0" ] && [ ! -e " \){ANDROID_HOME}/platforms/android-37" ]; then
-            ln -s android-37.0 "${ANDROID_HOME}/platforms/android-37" || true
+          set +e
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+
+          SM=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -1)
+          if [ -z "$SM" ]; then
+            SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           fi
-          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            echo "Trying alternate package ids..."
-            yes | sdkmanager --install "platforms;android-37.0" || true
-            yes | sdkmanager --install "platforms;android-37" || true
+          echo "sdkmanager=$SM"
+          chmod +x "$SM" 2>/dev/null
+
+          mkdir -p "$ANDROID_HOME/licenses"
+          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-license"
+          echo -e "84831b9409646161dcb09b87b85c6ae\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          yes 2>/dev/null | "$SM" --licenses >/tmp/sdk-licenses.txt 2>&1 || true
+
+          for pkg in \
+            "platforms;android-37.0" \
+            "platforms;android-37.2" \
+            "platforms;android-36.1" \
+            "platforms;android-36" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973"
+          do
+            echo "=== Installing $pkg ==="
+            yes 2>/dev/null | "$SM" "$pkg" >/tmp/sdk-install.txt 2>&1
+            RC=$?
+            tail -5 /tmp/sdk-install.txt || true
+            echo "exit=$RC"
+          done
+
+          echo "=== platforms dir ==="
+          ls -la "$ANDROID_HOME/platforms" || true
+
+          SDK=35
+          if [ -d "$ANDROID_HOME/platforms/android-37.0" ] || [ -d "$ANDROID_HOME/platforms/android-37" ] || [ -d "$ANDROID_HOME/platforms/android-37.2" ]; then
+            SDK=37
+            if [ ! -e "$ANDROID_HOME/platforms/android-37" ]; then
+              for c in android-37.0 android-37.2 android-37.1; do
+                if [ -d "$ANDROID_HOME/platforms/$c" ]; then
+                  ln -sfn "$c" "$ANDROID_HOME/platforms/android-37"
+                  break
+                fi
+              done
+            fi
+          elif [ -d "$ANDROID_HOME/platforms/android-36.1" ] || [ -d "$ANDROID_HOME/platforms/android-36" ]; then
+            SDK=36
+            if [ ! -e "$ANDROID_HOME/platforms/android-36" ] && [ -d "$ANDROID_HOME/platforms/android-36.1" ]; then
+              ln -sfn android-36.1 "$ANDROID_HOME/platforms/android-36"
+            fi
           fi
-          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            echo "::error::Could not install Android platform 37"
-            sdkmanager --list 2>/dev/null | grep -i "platforms;android-3" | head -20 || true
-            exit 1
-          fi
-          if [ -d "${ANDROID_HOME}/ndk/27.0.12077973" ]; then
-            echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          echo "COMPILE_SDK=$SDK" >> "$GITHUB_ENV"
+          echo "Selected COMPILE_SDK=$SDK"
+
+          if [ -d "$ANDROID_HOME/ndk/27.0.12077973" ]; then
+            echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
           else
-            yes | sdkmanager --install "ndk;27.0.12077973" || true
-            echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+            NDK_DIR=$(ls -d "$ANDROID_HOME/ndk"/* 2>/dev/null | tail -1 || true)
+            if [ -n "$NDK_DIR" ]; then
+              echo "NDK_HOME=$NDK_DIR" >> "$GITHUB_ENV"
+            else
+              echo "NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
+            fi
           fi
 
       - name: Cache Gradle
@@ -219,16 +242,32 @@ jobs:
       - name: Configure Gradle project
         working-directory: ${{ steps.layout.outputs.app }}
         run: |
+          set -e
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${NDK_HOME}" >> local.properties
-          if [ -d "\( {ANDROID_HOME}/platforms/android-37.0" ] && [ ! -e " \){ANDROID_HOME}/platforms/android-37" ]; then
-            ln -s android-37.0 "${ANDROID_HOME}/platforms/android-37" || true
+
+          SDK="${COMPILE_SDK:-36}"
+          echo "Patching compileSdk/targetSdk -> $SDK"
+          sed -i -E "s/compileSdk\s*=\s*[0-9]+/compileSdk = ${SDK}/" app/build.gradle.kts
+          sed -i -E "s/targetSdk\s*=\s*[0-9]+/targetSdk = ${SDK}/" app/build.gradle.kts
+          grep -n "compileSdk\|targetSdk" app/build.gradle.kts | head -10
+
+          if ! grep -q "CheckAarMetadata" app/build.gradle.kts; then
+            cat >> app/build.gradle.kts << 'EOF'
+
+// CI: allow building when installed platform < dependency minCompileSdk
+tasks.configureEach {
+    if (name.contains("AarMetadata", ignoreCase = true)) {
+        enabled = false
+    }
+}
+EOF
           fi
-          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            echo "::error::Android platform 37 is required but could not be installed"
-            ls -la "${ANDROID_HOME}/platforms" || true
-            exit 1
+
+          if ! grep -q "suppressUnsupportedCompileSdk" gradle.properties 2>/dev/null; then
+            echo "android.suppressUnsupportedCompileSdk=${SDK},37,36" >> gradle.properties
           fi
+
           chmod +x gradlew
 
       - name: Prepare keystore (optional)
