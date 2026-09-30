@@ -262,8 +262,13 @@ jobs:
           fi
 
           if ! grep -q "suppressUnsupportedCompileSdk" gradle.properties 2>/dev/null; then
-            echo "android.suppressUnsupportedCompileSdk=${SDK},37,36" >> gradle.properties
+            printf '\nandroid.suppressUnsupportedCompileSdk=%s,37,36\n' "$SDK" >> gradle.properties
           fi
+          if grep -q "falseandroid" gradle.properties 2>/dev/null; then
+            sed -i 's/falseandroid/false\nandroid/g' gradle.properties
+          fi
+          echo "=== gradle.properties (tail) ==="
+          tail -15 gradle.properties || true
 
           chmod +x gradlew
 
