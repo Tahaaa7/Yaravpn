@@ -3,11 +3,9 @@
 # روش استفاده:
 #   1) یک ریپوی خالی بساز
 #   2) فایل yara-vpn-for-github.zip را در ریشه ریپو آپلود/پوش کن
-#   3) همین workflow را هم در .github/workflows/ بگذار (یا از قبل داخل ZIP است)
+#   3) همین workflow را هم در .github/workflows/ بگذار
 #   4) Actions → Build from ZIP → Run workflow
 #   5) Artifacts → yara-vpn-apk
-#
-# اختیاری: می‌توانی به‌جای فایل داخل ریپو، لینک مستقیم ZIP را در input بدهی.
 
 name: Build from ZIP
 
@@ -76,7 +74,6 @@ jobs:
             echo "Using ZIP from repo: $ZIP_PATH"
             cp "$GITHUB_WORKSPACE/$ZIP_PATH" "$DEST"
           else
-            # هر zip در ریشه ریپو
             FOUND=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -type f -name '*.zip' | head -1 || true)
             if [ -n "$FOUND" ]; then
               echo "Using found ZIP: $FOUND"
@@ -98,7 +95,6 @@ jobs:
           mkdir -p "$WORK"
           unzip -q "$ZIP_FILE" -d "$WORK"
 
-          # اگر ZIP یک پوشهٔ واحد ساخته، یک سطح برو داخل
           ENTRIES=$(find "$WORK" -mindepth 1 -maxdepth 1 | wc -l)
           if [ "$ENTRIES" -eq 1 ]; then
             ONLY=$(find "$WORK" -mindepth 1 -maxdepth 1)
@@ -161,18 +157,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-zip-${{ runner.os }}-${{ hashFiles('**/libs.versions.toml') }}
+            \~/.gradle/caches
+            \~/.gradle/wrapper
+          key: gradle-zip-\( {{ runner.os }}- \){{ hashFiles('**/libs.versions.toml') }}
           restore-keys: gradle-zip-${{ runner.os }}-
 
       - name: Fetch hev-socks5-tunnel
         working-directory: ${{ steps.layout.outputs.root }}
         run: |
-          if [ ! -f hev-socks5-tunnel/Android.mk ] && [ ! -f hev-socks5-tunnel/Makefile ]; then
-            rm -rf hev-socks5-tunnel
-            git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
-          fi
+          # Need third-part/{yaml,lwip,hev-task-system} + src/core submodules
+          rm -rf hev-socks5-tunnel
+          git clone --depth 1 --recurse-submodules --shallow-submodules \
+            https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
+          git -C hev-socks5-tunnel submodule update --init --recursive || true
+          ls hev-socks5-tunnel/third-part/ || true
 
       - name: Build native hev-tun
         working-directory: ${{ steps.layout.outputs.root }}
@@ -207,7 +205,7 @@ jobs:
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${NDK_HOME}" >> local.properties
-          if [ ! -d "${ANDROID_HOME}/platforms/android-37" ] && [ ! -d "${ANDROID_HOME}/platforms/android-37.0" ]; then
+          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
             sed -i 's/compileSdk = 37/compileSdk = 35/' app/build.gradle.kts || true
             sed -i 's/targetSdk = 37/targetSdk = 35/' app/build.gradle.kts || true
           fi
@@ -237,8 +235,8 @@ jobs:
         run: |
           TYPE="${{ inputs.build_type || 'release' }}"
           SIGN_ARGS=""
-          if [ "${HAS_KS}" = "true" ] && [ -f "${KS_PATH:-}" ] && [ -n "${KS_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
-            SIGN_ARGS="-Pandroid.injected.signing.store.file=${KS_PATH} -Pandroid.injected.signing.store.password=${KS_PASS} -Pandroid.injected.signing.key.alias=${KEY_ALIAS} -Pandroid.injected.signing.key.password=${KEY_PASS:-$KS_PASS}"
+          if [ "\( {HAS_KS}" = "true" ] && [ -f " \){KS_PATH:-}" ] && [ -n "\( {KS_PASS:-}" ] && [ -n " \){KEY_ALIAS:-}" ]; then
+            SIGN_ARGS="-Pandroid.injected.signing.store.file=\( {KS_PATH} -Pandroid.injected.signing.store.password= \){KS_PASS} -Pandroid.injected.signing.key.alias=\( {KEY_ALIAS} -Pandroid.injected.signing.key.password= \){KEY_PASS:-$KS_PASS}"
           fi
           if [ "$TYPE" = "debug" ]; then
             ./gradlew assemblePlaystoreDebug --stacktrace --no-daemon
