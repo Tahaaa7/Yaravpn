@@ -140,12 +140,18 @@ jobs:
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "platforms;android-35 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
+          # compileSdk 37 is required by current AndroidX / Compose / Coil deps
+          packages: "platforms;android-37 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
           log-accepted-android-sdk-licenses: false
 
       - name: Export SDK / NDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
+            yes | sdkmanager --install "platforms;android-37" "platforms;android-37.0" "build-tools;35.0.0" || true
+            yes | sdkmanager --install "platforms;android-36" || true
+          fi
+          ls "${ANDROID_HOME}/platforms" || true
           if [ -d "${ANDROID_HOME}/ndk/27.0.12077973" ]; then
             echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
           else
@@ -165,7 +171,6 @@ jobs:
       - name: Fetch hev-socks5-tunnel
         working-directory: ${{ steps.layout.outputs.root }}
         run: |
-          # Need third-part/{yaml,lwip,hev-task-system} + src/core submodules
           rm -rf hev-socks5-tunnel
           git clone --depth 1 --recurse-submodules --shallow-submodules \
             https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
@@ -206,8 +211,13 @@ jobs:
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${NDK_HOME}" >> local.properties
           if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            sed -i 's/compileSdk = 37/compileSdk = 35/' app/build.gradle.kts || true
-            sed -i 's/targetSdk = 37/targetSdk = 35/' app/build.gradle.kts || true
+            echo "::warning::platform 37 missing; trying to install again"
+            yes | sdkmanager --install "platforms;android-37" "platforms;android-37.0" || true
+          fi
+          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
+            echo "::error::Android platform 37 is required but could not be installed"
+            ls -la "${ANDROID_HOME}/platforms" || true
+            exit 1
           fi
           chmod +x gradlew
 
