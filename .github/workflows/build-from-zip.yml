@@ -1,4 +1,4 @@
-# YARA VPN — extract ZIP + build APK (robust SDK install)
+# YARA VPN — extract ZIP + build APK
 name: Build from ZIP
 
 on:
@@ -138,8 +138,8 @@ jobs:
           chmod +x "$SM" 2>/dev/null
 
           mkdir -p "$ANDROID_HOME/licenses"
-          echo -e "24333f8a63b6825ea9c5514f83c2829b004d1fee\n" > "$ANDROID_HOME/licenses/android-sdk-license"
-          echo -e "84831b9409646161dcb09b87b85c6ae\n" > "$ANDROID_HOME/licenses/android-sdk-preview-license"
+          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$ANDROID_HOME/licenses/android-sdk-license"
+          printf '84831b9409646161dcb09b87b85c6ae\n' > "$ANDROID_HOME/licenses/android-sdk-preview-license"
           yes 2>/dev/null | "$SM" --licenses >/tmp/sdk-licenses.txt 2>&1 || true
 
           for pkg in \
@@ -248,20 +248,17 @@ jobs:
 
           SDK="${COMPILE_SDK:-36}"
           echo "Patching compileSdk/targetSdk -> $SDK"
-          sed -i -E "s/compileSdk\s*=\s*[0-9]+/compileSdk = ${SDK}/" app/build.gradle.kts
-          sed -i -E "s/targetSdk\s*=\s*[0-9]+/targetSdk = ${SDK}/" app/build.gradle.kts
+          sed -i -E "s/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = ${SDK}/" app/build.gradle.kts
+          sed -i -E "s/targetSdk[[:space:]]*=[[:space:]]*[0-9]+/targetSdk = ${SDK}/" app/build.gradle.kts
           grep -n "compileSdk\|targetSdk" app/build.gradle.kts | head -10
 
           if ! grep -q "CheckAarMetadata" app/build.gradle.kts; then
-            cat >> app/build.gradle.kts << 'EOF'
-
-// CI: allow building when installed platform < dependency minCompileSdk
-tasks.configureEach {
-    if (name.contains("AarMetadata", ignoreCase = true)) {
-        enabled = false
-    }
-}
-EOF
+            printf '\n// CI: skip AarMetadata when platform < dep minCompileSdk\n' >> app/build.gradle.kts
+            printf 'tasks.configureEach {\n' >> app/build.gradle.kts
+            printf '    if (name.contains("AarMetadata", ignoreCase = true)) {\n' >> app/build.gradle.kts
+            printf '        enabled = false\n' >> app/build.gradle.kts
+            printf '    }\n' >> app/build.gradle.kts
+            printf '}\n' >> app/build.gradle.kts
           fi
 
           if ! grep -q "suppressUnsupportedCompileSdk" gradle.properties 2>/dev/null; then
@@ -300,7 +297,6 @@ EOF
           if [ "$TYPE" = "debug" ]; then
             ./gradlew assemblePlaystoreDebug --stacktrace --no-daemon
           else
-            # shellcheck disable=SC2086
             ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
           fi
 
