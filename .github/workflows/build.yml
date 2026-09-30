@@ -140,18 +140,29 @@ jobs:
       - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
         with:
-          # compileSdk 37 is required by current AndroidX / Compose / Coil deps
-          packages: "platforms;android-37 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
+          # Package id is "android-37.0" (not "android-37")
+          packages: "platforms;android-37.0 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
           log-accepted-android-sdk-licenses: false
+          cmdline-tools-version: "12266719"
 
       - name: Export SDK / NDK
         run: |
           echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
-          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            yes | sdkmanager --install "platforms;android-37" "platforms;android-37.0" "build-tools;35.0.0" || true
-            yes | sdkmanager --install "platforms;android-36" || true
-          fi
+          echo "Available platforms:"
           ls "${ANDROID_HOME}/platforms" || true
+          if [ -d "\( {ANDROID_HOME}/platforms/android-37.0" ] && [ ! -e " \){ANDROID_HOME}/platforms/android-37" ]; then
+            ln -s android-37.0 "${ANDROID_HOME}/platforms/android-37" || true
+          fi
+          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
+            echo "Trying alternate package ids..."
+            yes | sdkmanager --install "platforms;android-37.0" || true
+            yes | sdkmanager --install "platforms;android-37" || true
+          fi
+          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
+            echo "::error::Could not install Android platform 37"
+            sdkmanager --list 2>/dev/null | grep -i "platforms;android-3" | head -20 || true
+            exit 1
+          fi
           if [ -d "${ANDROID_HOME}/ndk/27.0.12077973" ]; then
             echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
           else
@@ -210,9 +221,8 @@ jobs:
         run: |
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${NDK_HOME}" >> local.properties
-          if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
-            echo "::warning::platform 37 missing; trying to install again"
-            yes | sdkmanager --install "platforms;android-37" "platforms;android-37.0" || true
+          if [ -d "\( {ANDROID_HOME}/platforms/android-37.0" ] && [ ! -e " \){ANDROID_HOME}/platforms/android-37" ]; then
+            ln -s android-37.0 "${ANDROID_HOME}/platforms/android-37" || true
           fi
           if [ ! -d "\( {ANDROID_HOME}/platforms/android-37" ] && [ ! -d " \){ANDROID_HOME}/platforms/android-37.0" ]; then
             echo "::error::Android platform 37 is required but could not be installed"
