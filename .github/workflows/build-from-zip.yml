@@ -197,9 +197,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            \~/.gradle/caches
-            \~/.gradle/wrapper
-          key: gradle-zip-\( {{ runner.os }}- \){{ hashFiles('**/libs.versions.toml') }}
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-zip-${{ runner.os }}-${{ hashFiles('**/libs.versions.toml') }}
           restore-keys: gradle-zip-${{ runner.os }}-
 
       - name: Fetch hev-socks5-tunnel
@@ -298,14 +298,27 @@ jobs:
           KEY_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
           KEY_PASS: ${{ secrets.APP_KEY_PASSWORD }}
         run: |
+          set -e
           TYPE="${{ inputs.build_type || 'release' }}"
-          SIGN_ARGS=""
-          if [ "\( {HAS_KS}" = "true" ] && [ -f " \){KS_PATH:-}" ] && [ -n "\( {KS_PASS:-}" ] && [ -n " \){KEY_ALIAS:-}" ]; then
-            SIGN_ARGS="-Pandroid.injected.signing.store.file=\( {KS_PATH} -Pandroid.injected.signing.store.password= \){KS_PASS} -Pandroid.injected.signing.key.alias=\( {KEY_ALIAS} -Pandroid.injected.signing.key.password= \){KEY_PASS:-$KS_PASS}"
-          fi
-          if [ "$TYPE" = "debug" ]; then
+
+          # Without a real keystore, release APK is UNSIGNED and phones reject it
+          # ("App not installed"). Fall back to debug (auto-signed) or sign with
+          # the Android debug keystore so the APK is always installable.
+          if [ "${HAS_KS}" = "true" ] && [ -f "${KS_PATH:-}" ] && [ -n "${KS_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
+            SIGN_ARGS="-Pandroid.injected.signing.store.file=${KS_PATH} -Pandroid.injected.signing.store.password=${KS_PASS} -Pandroid.injected.signing.key.alias=${KEY_ALIAS} -Pandroid.injected.signing.key.password=${KEY_PASS:-$KS_PASS}"
+            echo "Using custom release keystore"
+            ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
+          elif [ "$TYPE" = "debug" ]; then
+            echo "Building debug (debug-signed, installable)"
             ./gradlew assemblePlaystoreDebug --stacktrace --no-daemon
           else
+            echo "No release keystore — signing release with Android debug keystore"
+            DEBUG_KS="${HOME}/.android/debug.keystore"
+            if [ ! -f "$DEBUG_KS" ]; then
+              mkdir -p "${HOME}/.android"
+              keytool -genkeypair -v -keystore "$DEBUG_KS" -storepass android -alias androiddebugkey                 -keypass android -keyalg RSA -keysize 2048 -validity 10000                 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
+            fi
+            SIGN_ARGS="-Pandroid.injected.signing.store.file=${DEBUG_KS} -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android"
             ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
           fi
 
