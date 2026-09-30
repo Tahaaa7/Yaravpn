@@ -1,0 +1,194 @@
+# YARA VPN — بیلد APK از روی ریپو (حتی اگر با ZIP آپلود شده باشد)
+#
+# استفاده:
+#   1) همین پروژه را به‌صورت ZIP روی GitHub آپلود / پوش کن
+#   2) Actions → Build YARA APK → Run workflow
+#   3) از Artifacts فایل APK را دانلود کن
+#
+# نیازی به ساب‌ماژول از قبل نیست؛ همه وابستگی‌ها در همین workflow گرفته می‌شوند.
+
+name: Build YARA APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "نوع بیلد"
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - debug
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yara-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # A) ریشه = کل پروژه YARA  →  android/v2rayNG/V2rayNG
+      # B) ریشه = فقط android/v2rayNG  →  V2rayNG
+      - name: Detect project layout
+        id: layout
+        run: |
+          if [ -d "android/v2rayNG/V2rayNG" ]; then
+            echo "root=android/v2rayNG" >> "$GITHUB_OUTPUT"
+            echo "app=android/v2rayNG/V2rayNG" >> "$GITHUB_OUTPUT"
+            echo "Layout: full YARA project"
+          elif [ -d "V2rayNG" ]; then
+            echo "root=." >> "$GITHUB_OUTPUT"
+            echo "app=V2rayNG" >> "$GITHUB_OUTPUT"
+            echo "Layout: android-only (v2rayNG root)"
+          else
+            echo "::error::Neither android/v2rayNG/V2rayNG nor V2rayNG found"
+            find . -maxdepth 3 -type d | head -50
+            exit 1
+          fi
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0 platform-tools ndk;27.0.12077973"
+          log-accepted-android-sdk-licenses: false
+
+      - name: Export SDK / NDK
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          if [ -d "${ANDROID_HOME}/ndk/27.0.12077973" ]; then
+            echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          else
+            yes | sdkmanager --install "ndk;27.0.12077973" || true
+            echo "NDK_HOME=${ANDROID_HOME}/ndk/27.0.12077973" >> "$GITHUB_ENV"
+          fi
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/libs.versions.toml', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Fetch hev-socks5-tunnel (no submodule required)
+        working-directory: ${{ steps.layout.outputs.root }}
+        run: |
+          if [ ! -f hev-socks5-tunnel/Android.mk ] && [ ! -f hev-socks5-tunnel/Makefile ]; then
+            rm -rf hev-socks5-tunnel
+            git clone --depth 1 https://github.com/heiher/hev-socks5-tunnel.git hev-socks5-tunnel
+          fi
+          ls hev-socks5-tunnel | head
+
+      - name: Build native hev-tun
+        working-directory: ${{ steps.layout.outputs.root }}
+        run: |
+          if [ -f compile-hevtun.sh ]; then
+            chmod +x compile-hevtun.sh
+            bash compile-hevtun.sh
+          else
+            echo "::warning::compile-hevtun.sh missing — VPN TUN libs may be incomplete"
+          fi
+          mkdir -p "${{ steps.layout.outputs.app }}/app/libs"
+          if [ -d libs ]; then
+            cp -a libs/. "${{ steps.layout.outputs.app }}/app/libs/" || true
+          fi
+
+      - name: Download libv2ray.aar (Xray core)
+        run: |
+          APP="${{ steps.layout.outputs.app }}"
+          mkdir -p "$APP/app/libs"
+          URL=$(curl -fsSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases/latest \
+            | python3 -c "import sys,json; r=json.load(sys.stdin); print(next((a['browser_download_url'] for a in r.get('assets',[]) if a['name']=='libv2ray.aar'),''))")
+          if [ -z "$URL" ]; then
+            URL=$(curl -fsSL https://api.github.com/repos/2dust/AndroidLibXrayLite/releases \
+              | python3 -c "import sys,json; rs=json.load(sys.stdin); print(next((a['browser_download_url'] for r in rs for a in r.get('assets',[]) if a['name']=='libv2ray.aar'),''))")
+          fi
+          if [ -z "$URL" ]; then
+            echo "::error::libv2ray.aar not found on AndroidLibXrayLite releases"
+            exit 1
+          fi
+          echo "Downloading $URL"
+          curl -fsSL "$URL" -o "$APP/app/libs/libv2ray.aar"
+          ls -lh "$APP/app/libs/libv2ray.aar"
+
+      - name: local.properties + SDK patch
+        working-directory: ${{ steps.layout.outputs.app }}
+        run: |
+          echo "sdk.dir=${ANDROID_HOME}" > local.properties
+          echo "ndk.dir=${NDK_HOME}" >> local.properties
+          if [ ! -d "${ANDROID_HOME}/platforms/android-37" ] && [ ! -d "${ANDROID_HOME}/platforms/android-37.0" ]; then
+            sed -i 's/compileSdk = 37/compileSdk = 35/' app/build.gradle.kts || true
+            sed -i 's/targetSdk = 37/targetSdk = 35/' app/build.gradle.kts || true
+          fi
+          chmod +x gradlew
+
+      - name: Prepare keystore (optional)
+        id: keystore
+        env:
+          KS_B64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "${KS_B64:-}" ]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/yara-release.jks"
+            echo "filePath=$RUNNER_TEMP/yara-release.jks" >> "$GITHUB_OUTPUT"
+            echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_keystore=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Assemble APK
+        working-directory: ${{ steps.layout.outputs.app }}
+        env:
+          KS_PATH: ${{ steps.keystore.outputs.filePath }}
+          HAS_KS: ${{ steps.keystore.outputs.has_keystore }}
+          KS_PASS: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+          KEY_PASS: ${{ secrets.APP_KEY_PASSWORD }}
+        run: |
+          TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          SIGN_ARGS=""
+          if [ "${HAS_KS}" = "true" ] && [ -f "${KS_PATH:-}" ] && [ -n "${KS_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
+            SIGN_ARGS="-Pandroid.injected.signing.store.file=${KS_PATH} -Pandroid.injected.signing.store.password=${KS_PASS} -Pandroid.injected.signing.key.alias=${KEY_ALIAS} -Pandroid.injected.signing.key.password=${KEY_PASS:-$KS_PASS}"
+            echo "Using release keystore"
+          else
+            echo "Building without custom keystore"
+          fi
+
+          if [ "$TYPE" = "debug" ]; then
+            ./gradlew assemblePlaystoreDebug --stacktrace --no-daemon
+          else
+            # shellcheck disable=SC2086
+            ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
+          fi
+
+      - name: Show APKs
+        if: always()
+        run: find "${{ steps.layout.outputs.app }}/app/build/outputs" -name '*.apk' -print 2>/dev/null || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yara-vpn-apk
+          path: |
+            **/app/build/outputs/apk/**/**/*.apk
+          if-no-files-found: warn
+          retention-days: 14
