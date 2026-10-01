@@ -243,10 +243,6 @@ jobs:
         working-directory: ${{ steps.layout.outputs.app }}
         run: |
           set -e
-          mkdir -p app/src/main/res/xml
-          if [ ! -f app/src/main/res/xml/cache_paths.xml ]; then
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<paths>' '    <cache-path name="cache" path="/" />' '</paths>' > app/src/main/res/xml/cache_paths.xml
-          fi
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${NDK_HOME}" >> local.properties
 
@@ -276,49 +272,49 @@ jobs:
 
           chmod +x gradlew
 
-      - name: Prepare keystore (optional)
+      - name: Prepare keystore (secret or auto-generated)
         id: keystore
         env:
           KS_B64: ${{ secrets.APP_KEYSTORE_BASE64 }}
+          SECRET_PASS: ${{ secrets.APP_KEYSTORE_PASSWORD }}
+          SECRET_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
         run: |
-          if [ -n "${KS_B64:-}" ]; then
+          if [ -n "${KS_B64:-}" ] && [ -n "${SECRET_PASS:-}" ] && [ -n "${SECRET_ALIAS:-}" ]; then
             echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/yara-release.jks"
             echo "filePath=$RUNNER_TEMP/yara-release.jks" >> "$GITHUB_OUTPUT"
-            echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+            echo "pass=$SECRET_PASS" >> "$GITHUB_OUTPUT"
+            echo "alias=$SECRET_ALIAS" >> "$GITHUB_OUTPUT"
+            echo "Using keystore from secrets"
           else
-            echo "has_keystore=false" >> "$GITHUB_OUTPUT"
+            # Without a signature Android refuses to install the APK, so generate one.
+            # NOTE: it is a different key on every run -> updating over an older install fails
+            # (uninstall first), or add the APP_KEYSTORE_* secrets for a stable key.
+            keytool -genkeypair -v -keystore "$RUNNER_TEMP/yara-release.jks" \
+              -storepass yara-ci-pass -keypass yara-ci-pass -alias yara \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=YARA VPN, OU=CI, O=YARA, C=IR"
+            echo "filePath=$RUNNER_TEMP/yara-release.jks" >> "$GITHUB_OUTPUT"
+            echo "pass=yara-ci-pass" >> "$GITHUB_OUTPUT"
+            echo "alias=yara" >> "$GITHUB_OUTPUT"
+            echo "Generated temporary keystore"
           fi
 
       - name: Assemble APK
         working-directory: ${{ steps.layout.outputs.app }}
         env:
           KS_PATH: ${{ steps.keystore.outputs.filePath }}
-          HAS_KS: ${{ steps.keystore.outputs.has_keystore }}
-          KS_PASS: ${{ secrets.APP_KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.APP_KEYSTORE_ALIAS }}
+          KS_PASS: ${{ steps.keystore.outputs.pass }}
+          KEY_ALIAS: ${{ steps.keystore.outputs.alias }}
           KEY_PASS: ${{ secrets.APP_KEY_PASSWORD }}
         run: |
-          set -e
           TYPE="${{ inputs.build_type || 'release' }}"
-
-          # Without a real keystore, release APK is UNSIGNED and phones reject it
-          # ("App not installed"). Fall back to debug (auto-signed) or sign with
-          # the Android debug keystore so the APK is always installable.
-          if [ "${HAS_KS}" = "true" ] && [ -f "${KS_PATH:-}" ] && [ -n "${KS_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
+          SIGN_ARGS=""
+          if [ -f "${KS_PATH:-}" ] && [ -n "${KS_PASS:-}" ] && [ -n "${KEY_ALIAS:-}" ]; then
             SIGN_ARGS="-Pandroid.injected.signing.store.file=${KS_PATH} -Pandroid.injected.signing.store.password=${KS_PASS} -Pandroid.injected.signing.key.alias=${KEY_ALIAS} -Pandroid.injected.signing.key.password=${KEY_PASS:-$KS_PASS}"
-            echo "Using custom release keystore"
-            ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
-          elif [ "$TYPE" = "debug" ]; then
-            echo "Building debug (debug-signed, installable)"
+          fi
+          if [ "$TYPE" = "debug" ]; then
             ./gradlew assemblePlaystoreDebug --stacktrace --no-daemon
           else
-            echo "No release keystore — signing release with Android debug keystore"
-            DEBUG_KS="${HOME}/.android/debug.keystore"
-            if [ ! -f "$DEBUG_KS" ]; then
-              mkdir -p "${HOME}/.android"
-              keytool -genkeypair -v -keystore "$DEBUG_KS" -storepass android -alias androiddebugkey                 -keypass android -keyalg RSA -keysize 2048 -validity 10000                 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
-            fi
-            SIGN_ARGS="-Pandroid.injected.signing.store.file=${DEBUG_KS} -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android"
             ./gradlew assemblePlaystoreRelease $SIGN_ARGS --stacktrace --no-daemon
           fi
 
